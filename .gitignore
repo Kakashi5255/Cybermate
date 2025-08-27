@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.env
+
+# Artifacts / datasets
+artifacts_local/
+Data/
+*.csv
+*.xlsx
+
+# OS/IDE
+.DS_Store
+.vscode/
