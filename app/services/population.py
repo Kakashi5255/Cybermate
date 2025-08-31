@@ -1,10 +1,10 @@
 POPULATION = {
-    "New South Wales":            8545140,
-    "Victoria":                   7011123,
-    "Queensland":                 5618765,
-    "South Australia":            1891670,
-    "Western Australia":          3008697,
-    "Tasmania":                   575756,
-    "Northern Territory":         262191,
-    "Australian Capital Territory": 481677
+    "NSW":            8545140,
+    "VIC":                   7011123,
+    "QLD":                 5618765,
+    "SA":            1891670,
+    "WA":          3008697,
+    "TAS":                   575756,
+    "NT":         262191,
+    "ACT": 481677
 }
