@@ -1,61 +1,90 @@
+# app/services/sql_schema.py
+
 SCHEMA_SQL = """
 -- Enable UUIDs if not already done
-create extension if not exists pgcrypto;
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
--- 1) RAW TABLE mirroring your CSV columns (snake_case)
-create table if not exists SCAM_DATA_RAW (
-  id uuid primary key default gen_random_uuid(),
+-- =========================================================
+-- 1) RAW TABLE (mirrors your CSV columns; unquoted -> lowercased identifiers)
+-- =========================================================
+CREATE TABLE IF NOT EXISTS SCAM_DATA_RAW (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
 
-  -- your columns:
-  date                  date,          -- from "Date"
-  state                 text,          -- from "State"
-  contact_method        text,          -- from "Contact Method"
-  age_group             text,          -- from "Age Group"
-  gender                text,          -- from "Gender"
-  scam_category         text,          -- from "Scam Category"
-  scam_type             text,          -- from "Scam Type"
-  aggregated_amount_lost numeric,      -- from "Aggregated Amount Lost"
-  number_of_reports     int,           -- from "Number of Reports"
-  year                  int            -- from "Year" (keep as provided)
+  -- CSV-derived columns
+  date                    DATE,         -- from "Date"
+  state                   TEXT,         -- from "State"
+  contact_method          TEXT,         -- from "Contact Method"
+  age_group               TEXT,         -- from "Age Group"
+  gender                  TEXT,         -- from "Gender"
+  scam_category           TEXT,         -- from "Scam Category"
+  scam_type               TEXT,         -- from "Scam Type"
+  aggregated_amount_lost  NUMERIC,      -- from "Aggregated Amount Lost"
+  number_of_reports       INT,          -- from "Number of Reports"
+  year                    INT           -- from "Year" (as provided)
 );
 
--- Helpful raw indexes (optional but good for big files)
-create index if not exists idx_raw_year on SCAM_DATA_RAW(year);
-create index if not exists idx_raw_date on SCAM_DATA_RAW(date);
-create index if not exists idx_raw_state on SCAM_DATA_RAW(state);
-create index if not exists idx_raw_category on SCAM_DATA_RAW(scam_category);
+-- Helpful indexes on RAW (idempotent)
+CREATE INDEX IF NOT EXISTS idx_raw_year      ON SCAM_DATA_RAW(year);
+CREATE INDEX IF NOT EXISTS idx_raw_date      ON SCAM_DATA_RAW(date);
+CREATE INDEX IF NOT EXISTS idx_raw_state     ON SCAM_DATA_RAW(state);
+CREATE INDEX IF NOT EXISTS idx_raw_category  ON SCAM_DATA_RAW(scam_category);
+CREATE INDEX IF NOT EXISTS idx_raw_type      ON SCAM_DATA_RAW(scam_type);
+CREATE INDEX IF NOT EXISTS idx_raw_contact   ON SCAM_DATA_RAW(contact_method);
+CREATE INDEX IF NOT EXISTS idx_raw_age       ON SCAM_DATA_RAW(age_group);
+CREATE INDEX IF NOT EXISTS idx_raw_gender    ON SCAM_DATA_RAW(gender);
 
+-- =========================================================
 -- 2) MATERIALIZED VIEW for fast dashboard queries
---    We keep your extra dimensions (scam_type, contact_method, age_group, gender)
---    so you can filter by them later if needed.
-create materialized view if not exists SCAM_STATS as
-select
-  coalesce(year, extract(year from date)::int) as year,
-  extract(month from date)::int                as month,
+--    Grain: year, month, state, category, scam_type, contact_method, age_group, gender
+-- =========================================================
+CREATE MATERIALIZED VIEW IF NOT EXISTS SCAM_STATS AS
+SELECT
+  COALESCE(year, EXTRACT(YEAR FROM date)::INT)       AS year,
+  EXTRACT(MONTH FROM date)::INT                      AS month,
   state,
-  scam_category       as category,
+  scam_category                                      AS category,
   scam_type,
   contact_method,
   age_group,
   gender,
-  sum(number_of_reports)           as reports,
-  sum(aggregated_amount_lost)::numeric as losses,
-  case
-    when sum(number_of_reports) > 0
-      then sum(aggregated_amount_lost) / sum(number_of_reports)
-    else 0
-  end as avg_loss
-from SCAM_DATA_RAW
-group by
-  coalesce(year, extract(year from date)::int),
-  extract(month from date)::int,
+  SUM(number_of_reports)                             AS reports,
+  SUM(aggregated_amount_lost)::NUMERIC               AS losses,
+  CASE WHEN SUM(number_of_reports) > 0
+       THEN SUM(aggregated_amount_lost) / SUM(number_of_reports)
+       ELSE 0
+  END                                                AS avg_loss
+FROM SCAM_DATA_RAW
+GROUP BY
+  COALESCE(year, EXTRACT(YEAR FROM date)::INT),
+  EXTRACT(MONTH FROM date)::INT,
   state, scam_category, scam_type, contact_method, age_group, gender;
 
--- Indexes to speed up filters on the materialized view
-create index if not exists idx_stats_year_month on SCAM_STATS(year, month);
-create index if not exists idx_stats_state on SCAM_STATS(state);
-create index if not exists idx_stats_category on SCAM_STATS(category);
+-- =========================================================
+-- 3) Indexes on the MATERIALIZED VIEW (speed up filters)
+-- =========================================================
+CREATE INDEX IF NOT EXISTS idx_stats_year_month   ON SCAM_STATS(year, month);
+CREATE INDEX IF NOT EXISTS idx_stats_state        ON SCAM_STATS(state);
+CREATE INDEX IF NOT EXISTS idx_stats_category     ON SCAM_STATS(category);
+CREATE INDEX IF NOT EXISTS idx_stats_type         ON SCAM_STATS(scam_type);
+CREATE INDEX IF NOT EXISTS idx_stats_contact      ON SCAM_STATS(contact_method);
+CREATE INDEX IF NOT EXISTS idx_stats_age          ON SCAM_STATS(age_group);
+CREATE INDEX IF NOT EXISTS idx_stats_gender       ON SCAM_STATS(gender);
 
--- If you need to refresh after loading new CSV rows:
--- REFRESH MATERIALIZED VIEW CONCURRENTLY SCAM_STATS;
+-- =========================================================
+-- 4) Unique index on MV grain (required for CONCURRENT refresh)
+-- =========================================================
+CREATE UNIQUE INDEX IF NOT EXISTS uq_stats_grain
+  ON SCAM_STATS(year, month, state, category, scam_type, contact_method, age_group, gender);
+
+-- =========================================================
+-- 5) Initial refresh (blocking) — safe to run after first load
+--    For subsequent loads, prefer the CONCURRENTLY form below.
+-- =========================================================
+REFRESH MATERIALIZED VIEW SCAM_STATS;
+
+-- =========================================================
+-- 6) Recommended (after each CSV load/merge):
+--    REFRESH MATERIALIZED VIEW CONCURRENTLY SCAM_STATS;
+--    (works because we created a UNIQUE index on the MV grain)
+-- =========================================================
 """
