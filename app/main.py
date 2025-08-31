@@ -95,9 +95,11 @@ def stats(
         where_sql = " AND ".join(where)
 
         kpi_sql = f"""
-          SELECT COALESCE(SUM(reports),0) AS reports,
-                 COALESCE(SUM(losses),0)::float AS losses,
-                 COALESCE(SUM(reports_with_loss),0) AS reports_with_loss
+          SELECT
+          COALESCE(SUM(reports), 0)                                  AS reports,
+          COALESCE(SUM(losses), 0)::float                            AS losses,
+          COALESCE(SUM(CASE WHEN losses IS NOT NULL AND losses > 0
+          THEN reports ELSE 0 END), 0)             AS reports_with_loss
           FROM scam_stats
           WHERE {where_sql};
         """
