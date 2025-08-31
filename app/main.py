@@ -8,10 +8,113 @@ from fastapi import FastAPI, Query
 from app.services.population import POPULATION
 from fastapi.middleware.cors import CORSMiddleware
 
+# ---- std lib
+import re
+
 app = FastAPI(title="ScamBot Backend", version="0.1.0")
 app.include_router(meta_router)
 
+# -------------------------------------------------
+# Normalisation helpers
+# -------------------------------------------------
+def _none_if_all(x: Optional[str]) -> Optional[str]:
+    """Treat 'All'/'Any'/'NA'/'N/A'/'' as None (no filter)."""
+    if x is None:
+        return None
+    v = str(x).strip()
+    if not v or v.lower() in {"all", "any", "na", "n/a"}:
+        return None
+    return v
 
+def _norm_key(s: str) -> str:
+    """Lowercase, replace '&' with 'and', strip punctuation to compare labels."""
+    s = s.lower().replace("&", "and")
+    s = re.sub(r"[^a-z0-9]+", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+# Canonical scam_type values (from your DB)
+_CANON_SCAM_TYPES = {
+    "phishing": "Phishing",
+    "identity theft": "Identity theft",
+    "hacking": "Hacking",
+    "remote access scams": "Remote access scams",
+    "overpayment scams": "Overpayment scams",
+    "mobile premium services": "Mobile premium services",
+    "health and medical products": "Health and medical products",
+    "classified scams": "Classified scams",
+    "online shopping scams": "Online shopping scams",
+    "false billing": "False billing",
+    "threats to life arrest or other": "Threats to life, arrest or other",
+    "investment scams": "Investment scams",
+    "dating and romance scams": "Dating and romance scams",
+    "fake charity scams": "Fake charity scams",
+    "unexpected prize and lottery scams": "Unexpected prize & lottery scams",
+    "rebate scams": "Rebate scams",
+    "jobs and employment scams": "Jobs and employment scams",
+    "travel prize scams": "Travel prize scams",
+    "ransomware and malware": "Ransomware and malware",
+    "inheritance and unexpected money": "inheritance and unexpected money",
+    "other scams": "Other scams",
+    "psychic and clairvoyant": "Psychic and clairvoyant",
+    "betting and sports investment scams": "Betting and sports investment scams",
+    "pyramid schemes": "Pyramid schemes",
+    "scratchie scams": "Scratchie scams",
+    "travel prizes and lottery scams": "Travel, prizes and lottery scams",
+    "inheritance scams": "Inheritance scams",
+}
+
+# Friendly aliases -> canonical scam_type
+_SCAM_TYPE_ALIASES = {
+    "unexpected prize & lottery scams": "Unexpected prize & lottery scams",
+    "unexpected prize and lottery": "Unexpected prize & lottery scams",
+    "travel prizes and lottery": "Travel, prizes and lottery scams",
+    "travel prize": "Travel prize scams",
+    "jobs and employment": "Jobs and employment scams",
+    "betting & sports investment scams": "Betting and sports investment scams",
+    "inheritance and unexpected": "inheritance and unexpected money",
+}
+
+def _map_scam_type(ui_value: Optional[str]) -> Optional[str]:
+    v = _none_if_all(ui_value)
+    if v is None:
+        return None
+    k = _norm_key(v)
+    if k in _CANON_SCAM_TYPES:
+        return _CANON_SCAM_TYPES[k]
+    if k in _SCAM_TYPE_ALIASES:
+        return _SCAM_TYPE_ALIASES[k]
+    return v  # best-effort fallback
+
+# If the UI sends abbreviations, map them to full names. If it already sends full
+# state names (as in your screenshot), this simply passes them through.
+STATE_MAP = {
+    "ACT": "Australian Capital Territory",
+    "NSW": "New South Wales",
+    "NT": "Northern Territory",
+    "QLD": "Queensland",
+    "SA": "South Australia",
+    "TAS": "Tasmania",
+    "VIC": "Victoria",
+    "WA": "Western Australia",
+}
+def _map_state(ui_value: Optional[str]) -> Optional[str]:
+    v = _none_if_all(ui_value)
+    if v is None:
+        return None
+    return STATE_MAP.get(v.upper(), v)
+
+def _map_category(ui_value: Optional[str]) -> Optional[str]:
+    # Category strings look already canonical; just handle All/Any/N/A.
+    return _none_if_all(ui_value)
+
+def _map_contact_method(ui_value: Optional[str]) -> Optional[str]:
+    return _none_if_all(ui_value)
+
+def _map_age_group(ui_value: Optional[str]) -> Optional[str]:
+    return _none_if_all(ui_value)
+
+def _map_gender(ui_value: Optional[str]) -> Optional[str]:
+    return _none_if_all(ui_value)
 
 # -------------------------------------------------
 # helpers
@@ -77,6 +180,14 @@ def stats(
     - breaking_news: always last 5 years, respects state only (ignores scam_type).
     """
     with get_conn() as conn:
+        # ---------- Normalise all incoming filters once ----------
+        norm_state          = _map_state(state)
+        norm_category       = _map_category(category)
+        norm_scam_type      = _map_scam_type(scam_type)
+        norm_contact_method = _map_contact_method(contact_method)
+        norm_age_group      = _map_age_group(age_group)
+        norm_gender         = _map_gender(gender)
+
         max_year, last5 = _get_year_bounds(conn)
 
         # ------------- KPI + SERIES + BREAKDOWN (Year filter applies) -------------
@@ -85,21 +196,21 @@ def stats(
             where, params,
             years=None if year is not None else last5,  # default window
             year=year,
-            state=state,
-            category=category,
-            scam_type=scam_type,
-            contact_method=contact_method,
-            age_group=age_group,
-            gender=gender,
+            state=norm_state,
+            category=norm_category,
+            scam_type=norm_scam_type,
+            contact_method=norm_contact_method,
+            age_group=norm_age_group,
+            gender=norm_gender,
         )
         where_sql = " AND ".join(where)
 
         kpi_sql = f"""
           SELECT
-          COALESCE(SUM(reports), 0)                                  AS reports,
-          COALESCE(SUM(losses), 0)::float                            AS losses,
-          COALESCE(SUM(CASE WHEN losses IS NOT NULL AND losses > 0
-          THEN reports ELSE 0 END), 0)             AS reports_with_loss
+            COALESCE(SUM(reports), 0)                       AS reports,
+            COALESCE(SUM(losses), 0)::float                 AS losses,
+            COALESCE(SUM(CASE WHEN losses IS NOT NULL AND losses > 0
+                               THEN reports ELSE 0 END), 0) AS reports_with_loss
           FROM scam_stats
           WHERE {where_sql};
         """
@@ -146,17 +257,18 @@ def stats(
         # ------------- Likelihood tiles (need population + state) -------------------
         likelihood_scammed_pct = None
         likelihood_loss_per_10 = None
-        if state and state in POPULATION and POPULATION[state]:
-            pop = float(POPULATION[state])
-            likelihood_scammed_pct = round((total_reports / pop) * 100.0, 2) if pop > 0 else None
-            likelihood_loss_per_10 = round((total_reports_with_loss / pop) * 10.0, 3) if pop > 0 else None
+        if norm_state and norm_state in POPULATION and POPULATION[norm_state]:
+            pop = float(POPULATION[norm_state])
+            if pop > 0:
+                likelihood_scammed_pct = round((total_reports / pop) * 100.0, 2)
+                likelihood_loss_per_10 = round((total_reports_with_loss / pop) * 10.0, 3)
 
         # ------------- Top 3 scams by loss (ALWAYS 2025 fallback -> max_year) ------
         top3_year = 2025 if (max_year and 2025 <= max_year) else max_year
-        top3_params: List[Any] = []
-        top3_where = ["year = %s"]; top3_params.append(top3_year)
-        if state:
-            top3_where.append("state = %s"); top3_params.append(state)
+        top3_params: List[Any] = [top3_year]
+        top3_where = ["year = %s"]
+        if norm_state:
+            top3_where.append("state = %s"); top3_params.append(norm_state)
         # by spec: ignore scam_type/category filters here
         top3_sql = f"""
           SELECT category, scam_type, contact_method,
@@ -184,16 +296,12 @@ def stats(
         # ------------- Breaking news (ALWAYS last 5 years, ignores scam_type) ------
         bn_params: List[Any] = []
         bn_where = ["1=1"]
-        # last5 may be [], handle gracefully
         if last5:
             placeholders = ",".join(["%s"] * len(last5))
             bn_where.append(f"year IN ({placeholders})"); bn_params.extend(last5)
-        if state:
-            bn_where.append("state = %s"); bn_params.append(state)
-        # ignore scam_type by design
+        if norm_state:
+            bn_where.append("state = %s"); bn_params.append(norm_state)
 
-        # We compute percentage change in losses by contact_method over the window:
-        # pct_change = (losses_latest - losses_earliest) / NULLIF(losses_earliest,0)
         bn_sql = f"""
           WITH by_year AS (
             SELECT contact_method, year, SUM(losses)::float AS losses
@@ -254,7 +362,7 @@ def stats(
 
         # New tiles for the frontend
         "likelihood": {
-            "state_population_used": POPULATION.get(state) if state else None,
+            "state_population_used": POPULATION.get(norm_state) if norm_state else None,
             "likelihood_scammed_pct": likelihood_scammed_pct,   # null if no/unknown state
             "likelihood_loss_per_10": likelihood_loss_per_10     # null if no/unknown state
         },
@@ -264,14 +372,13 @@ def stats(
         "breaking_news": breaking_news     # locked to last 5 years
     }
 
-
 # ---------- scambot /detect ----------
 app.include_router(detect_router)
 
-
+# ---------- CORS ----------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],         
+    allow_origins=["*"],
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
