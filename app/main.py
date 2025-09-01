@@ -374,7 +374,34 @@ def stats(
         "top3_by_loss": top3,              # locked to 2025 (or max year)
         "breaking_news": breaking_news     # locked to last 5 years
     }
+# ------------- Loss per minute (2025 Jan–Apr) -------------------------------
+# Always compute on 2025, months 1–4. Respect only `state` if provided.
+rate_year = 2025
+rate_month_start, rate_month_end = 1, 4
 
+rate_where = ["year = %s", "month BETWEEN %s AND %s"]
+rate_params: List[Any] = [rate_year, rate_month_start, rate_month_end]
+
+if state:
+    rate_where.append("state = %s")
+    rate_params.append(state)
+
+rate_sql = f"""
+  SELECT COALESCE(SUM(losses), 0)::float
+  FROM scam_stats
+  WHERE {" AND ".join(rate_where)};
+"""
+
+with get_conn() as conn_r, conn_r.cursor() as cur_r:
+    cur_r.execute(rate_sql, rate_params)
+    total_loss_2025_4mo = float(cur_r.fetchone()[0] or 0.0)
+
+# minutes in Jan–Apr 2025 (2025 is not a leap year):
+# Jan 31 + Feb 28 + Mar 31 + Apr 30 = 120 days
+minutes_in_window = 120 * 24 * 60  # 172,800
+loss_per_minute_2025_4mo = (
+    round(total_loss_2025_4mo / minutes_in_window, 2) if minutes_in_window > 0 else 0.0
+)
 # ---------- scambot /detect ----------
 app.include_router(detect_router)
 
