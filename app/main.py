@@ -262,7 +262,6 @@ def stats(
             likelihood_scammed_pct = round((total_reports / pop) * 100.0, 2) if pop > 0 else None
 
         # B) % of reports that had a non-zero financial loss (NEW definition)
-        #    This is independent of population and works for any filter combo.
         likelihood_loss_per_10 = (
             round((total_reports_with_loss / total_reports) * 10.0, 2)
             if total_reports > 0 else 0.0
