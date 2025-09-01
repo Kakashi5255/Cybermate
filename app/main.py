@@ -5,8 +5,8 @@ from app.routes.detect import router as detect_router
 from app.routes.meta import router as meta_router
 from typing import Optional, List, Any, Tuple
 from fastapi import FastAPI, Query
-from app.services.population import POPULATION
 from fastapi.middleware.cors import CORSMiddleware
+from app.services.population import POPULATION  # kept import; no longer used for scammed%
 
 # ---- std lib
 import re
@@ -85,8 +85,7 @@ def _map_scam_type(ui_value: Optional[str]) -> Optional[str]:
         return _SCAM_TYPE_ALIASES[k]
     return v  # best-effort fallback
 
-# If the UI sends abbreviations, map them to full names. If it already sends full
-# state names (as in your screenshot), this simply passes them through.
+# State mapping (accepts short codes; passes through full names)
 STATE_MAP = {
     "ACT": "Australian Capital Territory",
     "NSW": "New South Wales",
@@ -104,7 +103,6 @@ def _map_state(ui_value: Optional[str]) -> Optional[str]:
     return STATE_MAP.get(v.upper(), v)
 
 def _map_category(ui_value: Optional[str]) -> Optional[str]:
-    # Category strings look already canonical; just handle All/Any/N/A.
     return _none_if_all(ui_value)
 
 def _map_contact_method(ui_value: Optional[str]) -> Optional[str]:
@@ -178,9 +176,10 @@ def stats(
     - If `year` is provided: KPI/series/breakdown for that single year.
     - top3: always 2025 (fallback to max year), respects state only.
     - breaking_news: always last 5 years, respects state only (ignores scam_type).
+    - NEW: loss_per_minute_2025_4mo: always 2025 Jan–Apr, optional state filter.
     """
     with get_conn() as conn:
-        # ---------- Normalise all incoming filters once ----------
+        # ---------- Normalise incoming filters ----------
         norm_state          = _map_state(state)
         norm_category       = _map_category(category)
         norm_scam_type      = _map_scam_type(scam_type)
@@ -254,25 +253,19 @@ def stats(
                 for (c, rep, loss) in cur.fetchall()
             ]
 
-        # ------------- Likelihood tiles (need population + state) -------------------
-        # A) % of population that reported (still requires state population)
-        likelihood_scammed_pct = None
-        if state and state in POPULATION and POPULATION[state]:
-            pop = float(POPULATION[state])
-            likelihood_scammed_pct = round((total_reports / pop) * 100.0, 2) if pop > 0 else None
-
-        # B) % of reports that had a non-zero financial loss (NEW definition)
+        # ------------- Likelihood tiles (revised) -------------------
+        # Only keep: % of reports that had a non-zero financial loss, scaled per 10 users.
         likelihood_loss_per_10 = (
             round((total_reports_with_loss / total_reports) * 10.0, 2)
             if total_reports > 0 else 0.0
         )
+
         # ------------- Top 3 scams by loss (ALWAYS 2025 fallback -> max_year) ------
         top3_year = 2025 if (max_year and 2025 <= max_year) else max_year
         top3_params: List[Any] = [top3_year]
         top3_where = ["year = %s"]
         if norm_state:
             top3_where.append("state = %s"); top3_params.append(norm_state)
-        # by spec: ignore scam_type/category filters here
         top3_sql = f"""
           SELECT category, scam_type, contact_method,
                  SUM(losses)::float AS losses, SUM(reports) AS reports
@@ -354,6 +347,30 @@ def stats(
                 for (cm, pct, ls0, ls1) in cur3.fetchall()
             ]
 
+        # ------------- Loss per minute (2025 Jan–Apr), optional state filter -------
+        rate_year = 2025
+        rate_month_start, rate_month_end = 1, 4
+        rate_where = ["year = %s", "month BETWEEN %s AND %s"]
+        rate_params: List[Any] = [rate_year, rate_month_start, rate_month_end]
+        if norm_state:
+            rate_where.append("state = %s")
+            rate_params.append(norm_state)
+        rate_sql = f"""
+          SELECT COALESCE(SUM(losses), 0)::float
+          FROM scam_stats
+          WHERE {" AND ".join(rate_where)};
+        """
+        with get_conn() as conn_r, conn_r.cursor() as cur_r:
+            cur_r.execute(rate_sql, rate_params)
+            total_loss_2025_4mo = float(cur_r.fetchone()[0] or 0.0)
+
+        # Jan(31) + Feb(28) + Mar(31) + Apr(30) = 120 days (2025 is not leap)
+        minutes_in_window = 120 * 24 * 60  # 172,800
+        loss_per_minute_2025_4mo = (
+            round(total_loss_2025_4mo / minutes_in_window, 2) if minutes_in_window > 0 else 0.0
+        )
+
+    # ---------------- Final JSON ----------------
     return {
         "kpis": {
             "total_losses": round(total_losses, 2),
@@ -363,45 +380,26 @@ def stats(
         "series": series,
         "breakdown": breakdown,
 
-        # New tiles for the frontend
+        # Only the per-10 reports-with-loss metric retained
         "likelihood": {
-            "state_population_used": POPULATION.get(norm_state) if norm_state else None,
-            "likelihood_scammed_pct": likelihood_scammed_pct,   # null if no/unknown state
-            "likelihood_loss_per_10": likelihood_loss_per_10     # null if no/unknown state
+            "likelihood_loss_per_10": likelihood_loss_per_10
         },
 
         # Always-year-locked sections
-        "top3_by_loss": top3,              # locked to 2025 (or max year)
-        "breaking_news": breaking_news     # locked to last 5 years
+        "top3_by_loss": top3,
+        "breaking_news": breaking_news,
+
+        # New tile: Loss per minute (2025 Jan–Apr), optional state filter
+        "loss_per_minute_2025_4mo": {
+            "year": 2025,
+            "months": [1, 2, 3, 4],
+            "state_applied": norm_state or None,
+            "total_loss_window": round(total_loss_2025_4mo, 2),
+            "minutes_in_window": minutes_in_window,
+            "rate_per_minute": loss_per_minute_2025_4mo
+        }
     }
-# ------------- Loss per minute (2025 Jan–Apr) -------------------------------
-# Always compute on 2025, months 1–4. Respect only `state` if provided.
-rate_year = 2025
-rate_month_start, rate_month_end = 1, 4
 
-rate_where = ["year = %s", "month BETWEEN %s AND %s"]
-rate_params: List[Any] = [rate_year, rate_month_start, rate_month_end]
-
-if state:
-    rate_where.append("state = %s")
-    rate_params.append(state)
-
-rate_sql = f"""
-  SELECT COALESCE(SUM(losses), 0)::float
-  FROM scam_stats
-  WHERE {" AND ".join(rate_where)};
-"""
-
-with get_conn() as conn_r, conn_r.cursor() as cur_r:
-    cur_r.execute(rate_sql, rate_params)
-    total_loss_2025_4mo = float(cur_r.fetchone()[0] or 0.0)
-
-# minutes in Jan–Apr 2025 (2025 is not a leap year):
-# Jan 31 + Feb 28 + Mar 31 + Apr 30 = 120 days
-minutes_in_window = 120 * 24 * 60  # 172,800
-loss_per_minute_2025_4mo = (
-    round(total_loss_2025_4mo / minutes_in_window, 2) if minutes_in_window > 0 else 0.0
-)
 # ---------- scambot /detect ----------
 app.include_router(detect_router)
 
