@@ -255,14 +255,18 @@ def stats(
             ]
 
         # ------------- Likelihood tiles (need population + state) -------------------
+        # A) % of population that reported (still requires state population)
         likelihood_scammed_pct = None
-        likelihood_loss_per_10 = None
-        if norm_state and norm_state in POPULATION and POPULATION[norm_state]:
-            pop = float(POPULATION[norm_state])
-            if pop > 0:
-                likelihood_scammed_pct = round((total_reports / pop) * 100.0, 2)
-                likelihood_loss_per_10 = round((total_reports_with_loss / pop) * 10.0, 3)
+        if state and state in POPULATION and POPULATION[state]:
+            pop = float(POPULATION[state])
+            likelihood_scammed_pct = round((total_reports / pop) * 100.0, 2) if pop > 0 else None
 
+        # B) % of reports that had a non-zero financial loss (NEW definition)
+        #    This is independent of population and works for any filter combo.
+        likelihood_loss_per_10 = (
+            round((total_reports_with_loss / total_reports) * 100.0, 2)
+            if total_reports > 0 else 0.0
+        )
         # ------------- Top 3 scams by loss (ALWAYS 2025 fallback -> max_year) ------
         top3_year = 2025 if (max_year and 2025 <= max_year) else max_year
         top3_params: List[Any] = [top3_year]
