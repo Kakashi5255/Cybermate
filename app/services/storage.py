@@ -1,3 +1,8 @@
+# app/services/storage.py
+# Handles loading of ML model artifacts.
+# Prefers local files for faster development,
+# with fallback to Supabase storage if not found locally.
+
 import os, io, joblib
 from functools import lru_cache
 from supabase import create_client
@@ -10,13 +15,18 @@ LOCAL_DIR     = os.getenv("LOCAL_ART_DIR", f"artifacts_local/model_{VERSION}")
 
 @lru_cache(maxsize=1)
 def load_artifacts():
-    # Prefer local for dev speed
+    """
+    Load model and vectorizer artifacts.
+    - First checks local directory (for faster development)
+    - Falls back to Supabase storage if local artifacts are not found
+    """
+    # Local preference
     if LOCAL_DIR and os.path.isdir(LOCAL_DIR):
         model = joblib.load(os.path.join(LOCAL_DIR, "model.joblib"))
         vect  = joblib.load(os.path.join(LOCAL_DIR, "vectorizer.joblib"))
         return model, vect
 
-    # Fallback: download from Supabase Storage
+    # Remote fallback: download from Supabase
     client = create_client(SUPABASE_URL, SUPABASE_KEY)
     base = f"model_{VERSION}"
     mbytes = client.storage.from_(BUCKET).download(f"{base}/model.joblib")
