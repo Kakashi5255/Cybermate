@@ -1,4 +1,8 @@
 # app/main.py
+# Main FastAPI application for ScamBot Backend.
+# Provides metadata, statistics, and detection endpoints,
+# along with CORS and health checks.
+
 from app.config import APP_NAME, APP_VERSION
 from app.services.db import get_conn
 from app.routes.detect import router as detect_router
@@ -6,19 +10,18 @@ from app.routes.meta import router as meta_router
 from typing import Optional, List, Any, Tuple
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
-from app.services.population import POPULATION  # kept import; no longer used for scammed%
-
-# ---- std lib
 import re
 
-app = FastAPI(title="ScamBot Backend", version="0.1.0")
+app = FastAPI(title=APP_NAME, version=APP_VERSION)
+
+# Register routers
 app.include_router(meta_router)
 
 # -------------------------------------------------
-# Normalisation helpers
+# Normalisation helpers for query parameters
 # -------------------------------------------------
 def _none_if_all(x: Optional[str]) -> Optional[str]:
-    """Treat 'All'/'Any'/'NA'/'N/A'/'' as None (no filter)."""
+    """Map common 'All' values to None (meaning no filter)."""
     if x is None:
         return None
     v = str(x).strip()
@@ -27,12 +30,12 @@ def _none_if_all(x: Optional[str]) -> Optional[str]:
     return v
 
 def _norm_key(s: str) -> str:
-    """Lowercase, replace '&' with 'and', strip punctuation to compare labels."""
+    """Normalise text: lowercase, replace '&', and remove punctuation."""
     s = s.lower().replace("&", "and")
     s = re.sub(r"[^a-z0-9]+", " ", s)
     return re.sub(r"\s+", " ", s).strip()
 
-# Canonical scam_type values (from your DB)
+# Canonical scam_type values (from DB)
 _CANON_SCAM_TYPES = {
     "phishing": "Phishing",
     "identity theft": "Identity theft",
@@ -63,7 +66,7 @@ _CANON_SCAM_TYPES = {
     "inheritance scams": "Inheritance scams",
 }
 
-# Friendly aliases -> canonical scam_type
+# Aliases to canonical scam_type values
 _SCAM_TYPE_ALIASES = {
     "unexpected prize & lottery scams": "Unexpected prize & lottery scams",
     "unexpected prize and lottery": "Unexpected prize & lottery scams",
@@ -75,6 +78,7 @@ _SCAM_TYPE_ALIASES = {
 }
 
 def _map_scam_type(ui_value: Optional[str]) -> Optional[str]:
+    """Normalise scam_type input to canonical DB value if possible."""
     v = _none_if_all(ui_value)
     if v is None:
         return None
@@ -83,9 +87,9 @@ def _map_scam_type(ui_value: Optional[str]) -> Optional[str]:
         return _CANON_SCAM_TYPES[k]
     if k in _SCAM_TYPE_ALIASES:
         return _SCAM_TYPE_ALIASES[k]
-    return v  # best-effort fallback
+    return v
 
-# State mapping (accepts short codes; passes through full names)
+# State mapping (short codes to full names)
 STATE_MAP = {
     "ACT": "Australian Capital Territory",
     "NSW": "New South Wales",
@@ -96,6 +100,7 @@ STATE_MAP = {
     "VIC": "Victoria",
     "WA": "Western Australia",
 }
+
 def _map_state(ui_value: Optional[str]) -> Optional[str]:
     v = _none_if_all(ui_value)
     if v is None:
@@ -115,10 +120,10 @@ def _map_gender(ui_value: Optional[str]) -> Optional[str]:
     return _none_if_all(ui_value)
 
 # -------------------------------------------------
-# helpers
+# Query helpers
 # -------------------------------------------------
 def _get_year_bounds(conn) -> Tuple[int, List[int]]:
-    """Return (max_year, last5_years_desc)."""
+    """Return maximum year and list of last 5 years."""
     with conn.cursor() as cur:
         cur.execute("SELECT COALESCE(MAX(year), 0) FROM scam_stats;")
         row = cur.fetchone()
@@ -137,6 +142,7 @@ def _make_where(base: List[str], params: List[Any], *,
                 contact_method: Optional[str] = None,
                 age_group: Optional[str] = None,
                 gender: Optional[str] = None):
+    """Build WHERE clauses and parameter list for queries."""
     if year is not None:
         base.append("year = %s"); params.append(year)
     elif years:
@@ -157,7 +163,7 @@ def _make_where(base: List[str], params: List[Any], *,
         base.append("gender = %s"); params.append(gender)
 
 # -------------------------------------------------
-# /stats
+# /stats endpoint
 # -------------------------------------------------
 @app.get("/stats")
 def stats(
@@ -170,16 +176,15 @@ def stats(
     gender: Optional[str] = Query(None),
 ):
     """
-    Returns JSON for the dashboard, with Year logic and extra tiles.
-
-    - If `year` is omitted: KPI/series/breakdown use the last 5 years found in DB.
-    - If `year` is provided: KPI/series/breakdown for that single year.
-    - top3: always 2025 (fallback to max year), respects state only.
-    - breaking_news: always last 5 years, respects state only (ignores scam_type).
-    - NEW: loss_per_minute_2025_4mo: always 2025 Jan–Apr, optional state filter.
+    Provide statistics for the dashboard.
+    - If year is omitted → aggregate over last 5 years.
+    - If year is provided → filter for that year only.
+    - Top 3 scams always locked to 2025 (fallback to max year).
+    - Breaking news always uses last 5 years, ignores scam_type.
+    - Additional tile: loss per minute (Jan–Apr 2025).
     """
     with get_conn() as conn:
-        # ---------- Normalise incoming filters ----------
+        # Normalise incoming filters
         norm_state          = _map_state(state)
         norm_category       = _map_category(category)
         norm_scam_type      = _map_scam_type(scam_type)
@@ -189,7 +194,7 @@ def stats(
 
         max_year, last5 = _get_year_bounds(conn)
 
-        # ------------- KPI + SERIES + BREAKDOWN (Year filter applies) -------------
+        # ---------------- KPI + SERIES + BREAKDOWN ----------------
         where = ["1=1"]; params: List[Any] = []
         _make_where(
             where, params,
@@ -253,14 +258,13 @@ def stats(
                 for (c, rep, loss) in cur.fetchall()
             ]
 
-        # ------------- Likelihood tiles (revised) -------------------
-        # Only keep: % of reports that had a non-zero financial loss, scaled per 10 users.
+        # ---------------- Likelihood tiles ----------------
         likelihood_loss_per_10 = (
             round((total_reports_with_loss / total_reports) * 10.0, 2)
             if total_reports > 0 else 0.0
         )
 
-        # ------------- Top 3 scams by loss (ALWAYS 2025 fallback -> max_year) ------
+        # ---------------- Top 3 scams by loss ----------------
         top3_year = 2025 if (max_year and 2025 <= max_year) else max_year
         top3_params: List[Any] = [top3_year]
         top3_where = ["year = %s"]
@@ -289,7 +293,7 @@ def stats(
                 for (c, st, cm, ls, rp) in cur2.fetchall()
             ]
 
-        # ------------- Breaking news (ALWAYS last 5 years, ignores scam_type) ------
+        # ---------------- Breaking news ----------------
         bn_params: List[Any] = []
         bn_where = ["1=1"]
         if last5:
@@ -342,12 +346,12 @@ def stats(
                     "pct_change": round(float(pct or 0.0), 2),
                     "losses_start": float(ls0 or 0.0),
                     "losses_end": float(ls1 or 0.0),
-                    "window_years": last5,   # returned so UI can label the period
+                    "window_years": last5,
                 }
                 for (cm, pct, ls0, ls1) in cur3.fetchall()
             ]
 
-        # ------------- Loss per minute (2025 Jan–Apr), optional state filter -------
+        # ---------------- Loss per minute (2025 Jan–Apr) ----------------
         rate_year = 2025
         rate_month_start, rate_month_end = 1, 4
         rate_where = ["year = %s", "month BETWEEN %s AND %s"]
@@ -364,13 +368,12 @@ def stats(
             cur_r.execute(rate_sql, rate_params)
             total_loss_2025_4mo = float(cur_r.fetchone()[0] or 0.0)
 
-        # Jan(31) + Feb(28) + Mar(31) + Apr(30) = 120 days (2025 is not leap)
-        minutes_in_window = 120 * 24 * 60  # 172,800
+        minutes_in_window = 120 * 24 * 60  # Jan–Apr 2025 = 120 days
         loss_per_minute_2025_4mo = (
             round(total_loss_2025_4mo / minutes_in_window, 2) if minutes_in_window > 0 else 0.0
         )
 
-    # ---------------- Final JSON ----------------
+    # Final JSON response
     return {
         "kpis": {
             "total_losses": round(total_losses, 2),
@@ -379,17 +382,11 @@ def stats(
         },
         "series": series,
         "breakdown": breakdown,
-
-        # Only the per-10 reports-with-loss metric retained
         "likelihood": {
             "likelihood_loss_per_10": likelihood_loss_per_10
         },
-
-        # Always-year-locked sections
         "top3_by_loss": top3,
         "breaking_news": breaking_news,
-
-        # New tile: Loss per minute (2025 Jan–Apr), optional state filter
         "loss_per_minute_2025_4mo": {
             "year": 2025,
             "months": [1, 2, 3, 4],
@@ -400,10 +397,10 @@ def stats(
         }
     }
 
-# ---------- scambot /detect ----------
+# Register ScamBot detect router
 app.include_router(detect_router)
 
-# ---------- CORS ----------
+# Configure CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -414,4 +411,5 @@ app.add_middleware(
 
 @app.get("/healthz")
 def healthz():
-    return {"ok": True, "service": "ScamBot Backend", "version": "0.1.0"}
+    """Health check endpoint."""
+    return {"ok": True, "service": APP_NAME, "version": APP_VERSION}
