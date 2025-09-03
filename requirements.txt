@@ -11,6 +11,6 @@ supabase
 
 # ML & data handling
 joblib
-scikit-lear
+scikit-learn
 numpy
 pandas
