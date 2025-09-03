@@ -1,15 +1,37 @@
+# ------------------------
 # Python
+# ------------------------
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
 .venv/
 .env
 
+# ------------------------
 # Artifacts / datasets
+# ------------------------
 artifacts_local/
 Data/
 *.csv
 *.xlsx
+*.joblib   # in case artifacts leak outside artifacts_local
 
-# OS/IDE
+# ------------------------
+# Logs / outputs
+# ------------------------
+*.log
+
+# ------------------------
+# Jupyter
+# ------------------------
+.ipynb_checkpoints/
+
+# ------------------------
+# OS / IDE files
+# ------------------------
 .DS_Store
 .vscode/
