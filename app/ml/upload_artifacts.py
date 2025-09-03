@@ -1,4 +1,6 @@
 # app/ml/upload_artifacts.py
+# Script to upload trained model artifacts to a Supabase storage bucket.
+
 import os
 import pathlib
 from dotenv import load_dotenv
@@ -15,28 +17,29 @@ ART_DIR       = pathlib.Path("artifacts_local") / f"model_{VERSION}"
 client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 def ensure_bucket(bucket: str):
+    """Create the storage bucket if it does not already exist."""
     try:
         client.storage.create_bucket(bucket, public=False)
-        print(f"created bucket {bucket}")
+        print(f"Created bucket: {bucket}")
     except Exception:
-        # already exists
+        # Ignore if the bucket already exists
         pass
 
 def upload_file(local_path: pathlib.Path, dest_path: str):
+    """Upload a file to Supabase storage."""
     data = local_path.read_bytes()
-    # IMPORTANT: file_options values must be strings, not bools
     file_options = {
         "contentType": "application/octet-stream",
         "cacheControl": "3600",
         "upsert": "true",
     }
-    resp = client.storage.from_(BUCKET).upload(dest_path, data, file_options)
-    # storage3 returns None on success in some versions; just log path
-    print("uploaded:", dest_path)
+    client.storage.from_(BUCKET).upload(dest_path, data, file_options)
+    print("Uploaded:", dest_path)
 
 def main():
+    """Check for artifacts and upload them to the configured bucket."""
     if not ART_DIR.exists():
-        raise SystemExit(f"Artifacts dir not found: {ART_DIR}")
+        raise SystemExit(f"Artifacts directory not found: {ART_DIR}")
 
     m = ART_DIR / "model.joblib"
     v = ART_DIR / "vectorizer.joblib"
@@ -48,13 +51,12 @@ def main():
     base = f"model_{VERSION}"
     upload_file(m, f"{base}/model.joblib")
     upload_file(v, f"{base}/vectorizer.joblib")
-    print("upload complete")
+    print("Upload complete")
 
 if __name__ == "__main__":
     main()
 
-# add near the top, after load_dotenv()
+# Debugging output for environment variables
 print("SUPABASE_URL =", os.environ.get("SUPABASE_URL"))
 k = os.environ.get("SUPABASE_SERVICE_KEY", "")
 print("SERVICE_KEY head/tail/len:", k[:10], "...", k[-10:], "len=", len(k))
-
